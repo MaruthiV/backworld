@@ -127,19 +127,25 @@ import sys
 
 
 
-def test_scaling_runner_preserves_resource_limits_and_skipped_cases(tmp_path):
+@pytest.mark.parametrize("prune", [False, True])
+def test_scaling_runner_preserves_resource_limits_and_skipped_cases(tmp_path, prune):
     root = Path(__file__).resolve().parents[1]
     output = tmp_path / "scaling.json"
-    completed = subprocess.run([
+    command = [
         sys.executable, "-m", "experiments.scaling_audit",
         "--orders", "2", "3", "--variants", "shared", "--max-nodes", "1",
         "--samples", "1", "--repeats", "1", "--case-seconds", "10",
         "--total-seconds", "15", "--output", str(output),
-    ], cwd=root, env={**os.environ, "PYTHONPATH": str(root / "src")},
+    ]
+    if prune:
+        command.append("--prune-impossible")
+    completed = subprocess.run(command, cwd=root, env={**os.environ, "PYTHONPATH": str(root / "src")},
         capture_output=True, text=True, timeout=20)
     assert completed.returncode == 0, completed.stdout + completed.stderr
     report = json.loads(output.read_text())
     first, second = report["cases"]
+    assert report["config"]["prune_impossible"] == prune
+    assert first["prune_impossible"] == prune
     assert first["exact"]["status"] == "resource_limit"
     assert first["exact"]["success_probability"] is None
     assert second["status"] == "skipped"

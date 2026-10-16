@@ -25,7 +25,10 @@ def run_case(args):
 
     torch.set_num_threads(1)
     warmup_started = perf_counter()
-    warmup = compile_world(OrderWorld(), 3)
+    warmup = compile_world(
+        OrderWorld(target_orders=(True, False)), 3,
+        prune_impossible=args.prune_impossible,
+    )
     warmup.expected_return(SoftmaxPolicy(initial_weights())).backward()
     warmup_seconds = perf_counter() - warmup_started
 
@@ -44,12 +47,16 @@ def run_case(args):
         "horizon": horizon,
         "action_count": world.action_count,
         "parameter_count": weights.size,
+        "prune_impossible": args.prune_impossible,
         "warmup_seconds": warmup_seconds,
     }
     exact_gradient = None
     try:
         started = perf_counter()
-        graph = compile_world(world, horizon, args.max_nodes, args.construction_seconds)
+        graph = compile_world(
+            world, horizon, args.max_nodes, args.construction_seconds,
+            prune_impossible=args.prune_impossible,
+        )
         construction_seconds = perf_counter() - started
         policy = SoftmaxPolicy(weights)
         durations = []
@@ -70,6 +77,8 @@ def run_case(args):
         result["exact"] = {
             "status": "complete", "graph_nodes": graph.node_count,
             "graph_edges": graph.edge_count,
+            "pruned_edges": graph.pruned_edges,
+            "feasibility_evaluations": graph.feasibility_evaluations,
             "layer_sizes": [len(layer) for layer in graph.layers],
             "graph_tensor_bytes": sum(t.numel() * t.element_size() for t in tensors),
             "construction_seconds": construction_seconds,
@@ -146,6 +155,7 @@ def main():
     parser.add_argument("--total-seconds", type=float, default=240.0)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--samples", type=int, default=32)
+    parser.add_argument("--prune-impossible", action="store_true")
     parser.add_argument("--output", type=Path, default=Path("results/scaling-audit.json"))
     parser.add_argument("--worker", action="store_true")
     args = parser.parse_args()
@@ -194,6 +204,8 @@ def main():
                 "--planner-seconds", str(args.planner_seconds),
                 "--repeats", str(args.repeats), "--samples", str(args.samples),
             ]
+            if args.prune_impossible:
+                command.append("--prune-impossible")
             print(f"Profiling {count} orders ({variant})", flush=True)
             case_started = perf_counter()
             try:
