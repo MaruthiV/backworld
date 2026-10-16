@@ -21,8 +21,22 @@ def observation(
     ))
 
 
-def initial_weights(seed: int = 7) -> np.ndarray:
-    return np.random.default_rng(seed).normal(0, 0.15, (ACTION_COUNT, FEATURE_COUNT))
+def initial_weights(seed: int = 7, world: OrderWorld | None = None) -> np.ndarray:
+    world = OrderWorld() if world is None else world
+    shape = (world.action_count, 6 * world.order_count + 4)
+    return np.random.default_rng(seed).normal(0, 0.15, shape)
+
+
+def validate_weights(weights: np.ndarray, world: OrderWorld | None = None):
+    if weights.ndim != 2 or not np.isfinite(weights).all():
+        raise ValueError("weights must be a finite action-by-feature matrix")
+    if world is None:
+        orders, remainder = divmod(weights.shape[0] - 2, 4)
+        valid = orders >= 1 and remainder == 0 and weights.shape[1] == 6 * orders + 4
+    else:
+        valid = weights.shape == (world.action_count, 6 * world.order_count + 4)
+    if not valid:
+        raise ValueError("weight dimensions do not match the order world")
 
 
 def probabilities(weights: np.ndarray, features: np.ndarray) -> np.ndarray:
@@ -41,8 +55,7 @@ class SoftmaxPolicy(torch.nn.Module):
     def __init__(self, weights: np.ndarray):
         super().__init__()
         weights = np.asarray(weights, dtype=np.float64)
-        if weights.shape != (ACTION_COUNT, FEATURE_COUNT) or not np.isfinite(weights).all():
-            raise ValueError("weights must be a finite action-by-feature matrix")
+        validate_weights(weights)
         self.weights = torch.nn.Parameter(torch.tensor(weights, dtype=torch.float64))
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:

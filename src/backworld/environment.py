@@ -12,8 +12,8 @@ ACTION_COUNT = len(ACTION_NAMES)
 
 @dataclass(frozen=True, slots=True)
 class OrderState:
-    stages: tuple[int, int]
-    stock: tuple[int, int]
+    stages: tuple[int, ...]
+    stock: tuple[int, ...]
     replenishments: int
 
 
@@ -22,30 +22,40 @@ class OrderWorld:
     shared_inventory: bool = True
     initial_stock: int = 1
     replenishments: int = 1
-    target_orders: tuple[bool, bool] = (True, True)
+    target_orders: tuple[bool, ...] = (True, True)
 
     def __post_init__(self):
         if self.initial_stock < 0 or self.replenishments < 0:
             raise ValueError("stock and replenishments must be nonnegative")
-        if len(self.target_orders) != 2:
-            raise ValueError("exactly two target flags are required")
+        if not self.target_orders:
+            raise ValueError("at least one order is required")
+
+    @property
+    def order_count(self) -> int:
+        return len(self.target_orders)
+
+    @property
+    def action_count(self) -> int:
+        return 4 * self.order_count + 2
 
     def initial_state(self) -> OrderState:
-        stock = (self.initial_stock, 0 if self.shared_inventory else self.initial_stock)
-        return OrderState((0, 0), stock, self.replenishments)
+        stock = (self.initial_stock,) + (
+            (0 if self.shared_inventory else self.initial_stock),
+        ) * (self.order_count - 1)
+        return OrderState((0,) * self.order_count, stock, self.replenishments)
 
     def step(self, state: OrderState, action: int) -> OrderState:
         action = index(action)
-        if not 0 <= action < ACTION_COUNT:
+        if not 0 <= action < self.action_count:
             raise ValueError("action is outside the supported action set")
-        if action == 9:
+        if action == self.action_count - 1:
             return state
-        if action == 8:
+        if action == self.action_count - 2:
             if state.replenishments == 0:
                 return state
             return OrderState(
                 state.stages,
-                (state.stock[0] + 1, state.stock[1]),
+                (state.stock[0] + 1,) + state.stock[1:],
                 state.replenishments - 1,
             )
 

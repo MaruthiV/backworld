@@ -1,7 +1,7 @@
 import numpy as np
 
-from backworld.environment import ACTION_COUNT, OrderState, OrderWorld
-from backworld.policy import FEATURE_COUNT, action_score, observation, probabilities
+from backworld.environment import OrderState, OrderWorld
+from backworld.policy import action_score, observation, probabilities, validate_weights
 
 
 class ExactSuffix:
@@ -12,8 +12,7 @@ class ExactSuffix:
         if not 0 <= exact_steps <= horizon:
             raise ValueError("exact_steps must lie between zero and the horizon")
         weights = np.array(weights, dtype=np.float64, copy=True)
-        if weights.shape != (ACTION_COUNT, FEATURE_COUNT) or not np.isfinite(weights).all():
-            raise ValueError("weights must be a finite action-by-feature matrix")
+        validate_weights(weights, world)
         if not np.isfinite(baseline):
             raise ValueError("baseline must be finite")
         weights.flags.writeable = False
@@ -47,7 +46,7 @@ class ExactSuffix:
             features, probs = self._policy(state, remaining)
             value = 0.0
             derivative = np.zeros_like(self.weights)
-            for action in range(ACTION_COUNT):
+            for action in range(self.world.action_count):
                 following = self.world.step(state, action)
                 self.transitions += 1
                 child_value, child_derivative = self.continuation(following, remaining - 1)
@@ -65,7 +64,7 @@ class ExactSuffix:
         score = np.zeros_like(self.weights)
         for remaining in range(self.horizon, self.exact_steps, -1):
             features, probs = self._policy(state, remaining)
-            action = int(rng.choice(ACTION_COUNT, p=probs))
+            action = int(rng.choice(self.world.action_count, p=probs))
             score += action_score(features, probs, action)
             state = self.world.step(state, action)
             self.transitions += 1

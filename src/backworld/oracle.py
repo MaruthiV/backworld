@@ -2,9 +2,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from backworld.environment import ACTION_COUNT, OrderWorld
+from backworld.environment import OrderWorld
 from backworld.estimators import ExactSuffix
-from backworld.policy import action_score, observation, probabilities
+from backworld.policy import action_score, observation, probabilities, validate_weights
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,7 @@ class GradientMoments:
 def exact_forward(world: OrderWorld, weights: np.ndarray, horizon: int) -> OracleResult:
     if horizon < 0:
         raise ValueError("horizon must be nonnegative")
+    validate_weights(weights, world)
     frontier = {world.initial_state(): (1.0, np.zeros_like(weights))}
     state_evaluations = 0
     for elapsed in range(horizon):
@@ -32,7 +33,7 @@ def exact_forward(world: OrderWorld, weights: np.ndarray, horizon: int) -> Oracl
             features = observation(world, state, horizon - elapsed, horizon)
             probs = probabilities(weights, features)
             state_evaluations += 1
-            for action in range(ACTION_COUNT):
+            for action in range(world.action_count):
                 destination = world.step(state, action)
                 next_mass = mass * probs[action]
                 next_derivative = probs[action] * (
@@ -53,7 +54,7 @@ def exact_forward(world: OrderWorld, weights: np.ndarray, horizon: int) -> Oracl
         reward = world.reward(state)
         value += mass * reward
         gradient += derivative * reward
-    return OracleResult(value, gradient, state_evaluations, state_evaluations * ACTION_COUNT)
+    return OracleResult(value, gradient, state_evaluations, state_evaluations * world.action_count)
 
 
 def exact_suffix_moments(
@@ -67,7 +68,7 @@ def exact_suffix_moments(
         for state, (mass, score_sum, score_squared) in frontier.items():
             features = observation(world, state, horizon - elapsed, horizon)
             probs = probabilities(weights, features)
-            for action in range(ACTION_COUNT):
+            for action in range(world.action_count):
                 score = action_score(features, probs, action)
                 next_mass = probs[action] * mass
                 next_sum = probs[action] * (score_sum + mass * score)

@@ -1,10 +1,20 @@
 from dataclasses import dataclass
+from math import isfinite
+from time import perf_counter
 
 import numpy as np
 import torch
 
-from backworld.environment import ACTION_COUNT, OrderState, OrderWorld
+from backworld.environment import OrderState, OrderWorld
 from backworld.policy import SoftmaxPolicy, observation
+
+
+class GraphLimitError(ValueError):
+    def __init__(self, limit: str, nodes: int, elapsed_seconds: float):
+        super().__init__(f"reachable graph exceeds {limit}")
+        self.limit = limit
+        self.nodes = nodes
+        self.elapsed_seconds = elapsed_seconds
 
 
 @dataclass(frozen=True)
@@ -31,9 +41,21 @@ class CompiledWorld:
         return values[0] + weights.sum() * 0
 
 
-def compile_world(world: OrderWorld, horizon: int, max_nodes: int = 100_000) -> CompiledWorld:
+def compile_world(
+    world: OrderWorld, horizon: int, max_nodes: int = 100_000,
+    max_seconds: float | None = None,
+) -> CompiledWorld:
     if horizon < 0 or max_nodes < 1:
         raise ValueError("horizon must be nonnegative and max_nodes must be positive")
+    if max_seconds is not None and (not isfinite(max_seconds) or max_seconds <= 0):
+        raise ValueError("max_seconds must be finite and positive")
+    started = perf_counter()
+
+    def check_deadline(nodes):
+        elapsed = perf_counter() - started
+        if max_seconds is not None and elapsed > max_seconds:
+            raise GraphLimitError("max_seconds", nodes, elapsed)
+
     layers = [(world.initial_state(),)]
     transitions = []
     features = []
@@ -42,13 +64,16 @@ def compile_world(world: OrderWorld, horizon: int, max_nodes: int = 100_000) -> 
         current = layers[-1]
         next_ids = {}
         next_states = []
-        targets = np.empty((len(current), ACTION_COUNT), dtype=np.int64)
+        targets = np.empty((len(current), world.action_count), dtype=np.int64)
         for state_id, state in enumerate(current):
-            for action in range(ACTION_COUNT):
+            check_deadline(node_count + len(next_states))
+            for action in range(world.action_count):
                 following = world.step(state, action)
                 if following not in next_ids:
                     if node_count + len(next_states) + 1 > max_nodes:
-                        raise ValueError("reachable graph exceeds max_nodes")
+                        raise GraphLimitError(
+                            "max_nodes", node_count + len(next_states), perf_counter() - started,
+                        )
                     next_ids[following] = len(next_states)
                     next_states.append(following)
                 targets[state_id, action] = next_ids[following]
@@ -59,5 +84,6 @@ def compile_world(world: OrderWorld, horizon: int, max_nodes: int = 100_000) -> 
         layers.append(tuple(next_states))
         node_count += len(next_states)
 
+    check_deadline(node_count)
     rewards = torch.tensor([world.reward(state) for state in layers[-1]], dtype=torch.float64)
     return CompiledWorld(tuple(layers), tuple(transitions), tuple(features), rewards)
