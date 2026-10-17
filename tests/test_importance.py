@@ -3,7 +3,7 @@ import pytest
 
 from backworld import OrderWorld
 from backworld.importance import FeasibleImportance
-from backworld.oracle import exact_forward
+from backworld.oracle import OracleLimitError, exact_forward, exact_importance_moments
 from backworld.policy import action_score, initial_weights, observation, probabilities
 
 
@@ -41,6 +41,7 @@ def check_exhaustive_estimates(world, horizon):
     mean_gradient = np.zeros_like(weights)
     second_value = second_gradient = 0.0
     expected_second_value = expected_second_gradient = 0.0
+    proposal_success = 0.0
     for mass, choices, actions in proposal_paths(sampler, world.initial_state(), horizon):
         value, gradient = sampler.estimate(FixedChoices(choices))
         state = world.initial_state()
@@ -64,12 +65,25 @@ def check_exhaustive_estimates(world, horizon):
         original_squared_mass = (policy_mass * reward) ** 2 / mass
         expected_second_value += original_squared_mass
         expected_second_gradient += original_squared_mass * np.sum(score ** 2)
+        proposal_success += mass * reward
     assert total_mass == pytest.approx(1.0, abs=1e-12)
     assert mean_value == pytest.approx(reference.value, rel=1e-12, abs=1e-20)
     np.testing.assert_allclose(mean_gradient, reference.gradient, atol=1e-16, rtol=1e-10)
     assert second_value == pytest.approx(expected_second_value, rel=1e-12, abs=1e-25)
     assert second_gradient == pytest.approx(expected_second_gradient, rel=1e-12, abs=1e-25)
     assert second_gradient + 1e-16 >= np.sum(reference.gradient ** 2)
+    moments = exact_importance_moments(world, weights, horizon)
+    assert moments.value == pytest.approx(reference.value, rel=1e-12, abs=1e-20)
+    np.testing.assert_allclose(moments.mean, reference.gradient, atol=1e-16, rtol=1e-10)
+    assert moments.value_second_moment == pytest.approx(second_value, rel=1e-12, abs=1e-25)
+    assert moments.gradient_second_moment == pytest.approx(second_gradient, rel=1e-12, abs=1e-25)
+    assert moments.proposal_success_probability == pytest.approx(proposal_success, abs=1e-12)
+    assert moments.value_variance == pytest.approx(
+        max(0.0, second_value - mean_value ** 2), rel=1e-12, abs=1e-18,
+    )
+    assert moments.variance_trace == pytest.approx(
+        max(0.0, second_gradient - np.sum(mean_gradient ** 2)), rel=1e-12, abs=1e-17,
+    )
 
 
 @pytest.mark.parametrize("world,horizon", [
@@ -155,3 +169,32 @@ def test_invalid_horizon_and_mismatched_weights_are_rejected():
         FeasibleImportance(OrderWorld(), initial_weights(), -1)
     with pytest.raises(ValueError, match="dimensions"):
         FeasibleImportance(OrderWorld(target_orders=(True,)), initial_weights(), 3)
+
+
+def test_importance_moment_node_cap_preserves_the_resource_failure():
+    with pytest.raises(OracleLimitError) as failure:
+        exact_importance_moments(OrderWorld(), initial_weights(), 8, max_nodes=1)
+    assert failure.value.limit == "max_nodes"
+    assert failure.value.nodes == 1
+
+
+def test_importance_moment_deadline_does_not_return_zero(monkeypatch):
+    clock = iter([0.0, 2.0])
+    monkeypatch.setattr("backworld.oracle.perf_counter", lambda: next(clock))
+    with pytest.raises(OracleLimitError) as failure:
+        exact_importance_moments(OrderWorld(), initial_weights(), 8, max_seconds=1.0)
+    assert failure.value.limit == "max_seconds"
+
+
+@pytest.mark.parametrize("seconds", [0.0, float("nan"), float("inf")])
+def test_importance_moments_reject_invalid_deadlines(seconds):
+    with pytest.raises(ValueError, match="max_seconds"):
+        exact_importance_moments(OrderWorld(), initial_weights(), 0, max_seconds=seconds)
+
+
+def test_importance_moment_underflow_is_not_reported_as_zero_variance():
+    weights = np.zeros_like(initial_weights())
+    weights[-1, -1] = 400
+    world = OrderWorld(target_orders=(True, False))
+    with pytest.raises(FloatingPointError, match="moment factor underflow"):
+        exact_importance_moments(world, weights, 3)
