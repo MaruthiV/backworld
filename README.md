@@ -1,3 +1,3 @@
 # Backworld
 
-Research into training agents from executable environment rules using exact calculations and sampled experience. Early-stage project; local research and session instructions live in `docs/`.
+Experiments toward an RL-trained operator that restores real software services under failure. Early work measures recovery behavior and application correctness; local research and session instructions live in `docs/`.
