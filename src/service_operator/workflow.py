@@ -4,6 +4,29 @@ import json
 BOOKING_MESSAGE = {"message": "Reserve successfully!"}
 
 
+def check_window(before, immediate, after, events):
+    old = {row["_id"]: row for row in before["reservations"]}
+    new = {row["_id"]: row for row in after["reservations"]}
+    prior_ok = all(json.dumps(new.get(key), sort_keys=True) == json.dumps(row, sort_keys=True) for key, row in old.items())
+    added = [row for key, row in new.items() if key not in old]
+    expected = {event["expected"]["customerName"]: event["expected"] for event in events}
+    accounted = len(expected) == len(events) and all(row.get("customerName") in expected for row in added)
+    unique_ids = len(old) == len(before["reservations"]) and len(new) == len(after["reservations"])
+    invariant = (prior_ok and json.dumps(before["capacity"], sort_keys=True) == json.dumps(after["capacity"], sort_keys=True)
+                 and json.dumps(immediate, sort_keys=True) == json.dumps(after, sort_keys=True) and accounted and unique_ids)
+    verdicts = []
+    for event in events:
+        rows = [row for row in added if row.get("customerName") == event["expected"]["customerName"]]
+        verdict = check_booking([], rows, event["expected"], event["response"])
+        invariant &= (len(rows) == 0 or verdict["exact_new_write"]) and (not verdict["acknowledged"] or verdict["exact_new_write"])
+        verdicts.append(verdict)
+    for event, verdict in zip(events, verdicts):
+        on_time = event["acknowledgement_monotonic_s"] - event["offered_monotonic_s"] <= 2
+        verdict.update({"prior_preserved": prior_ok, "invariant_ok": invariant, "on_time": on_time,
+                        "accepted": verdict["accepted"] and invariant and on_time})
+    return verdicts
+
+
 def check_booking(before, after, expected, response):
     def index(rows):
         if any(not isinstance(row.get("_id"), str) for row in rows):

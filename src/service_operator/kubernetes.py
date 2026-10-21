@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -29,14 +30,16 @@ class LocalCluster:
         self.env = {**os.environ, "DOCKER_CONTEXT": context, "KIND_EXPERIMENTAL_PROVIDER": "docker",
                     "KIND_EXPERIMENTAL_DOCKER_NETWORK": self.network, "KUBECONFIG": str(self.kubeconfig)}
         self.count = 0
+        self.command_lock = threading.Lock()
         self.network_created = False
         self.process = None
         self.aliases = {}
         self.image_records = {}
 
     def command(self, args, timeout=30, input=None, check=True):
-        self.count += 1
-        prefix = self.output / f"command-{self.count:04d}"
+        with self.command_lock:
+            self.count += 1
+            prefix = self.output / f"command-{self.count:04d}"
         started = time.monotonic()
         record = {"args": args, "started_unix_s": time.time()}
         try:

@@ -2,7 +2,7 @@ import copy
 
 import pytest
 
-from service_operator.workflow import check_booking
+from service_operator.workflow import check_booking, check_window
 
 
 PRIOR = {"_id": "old", "hotelId": "4", "customerName": "Alice",
@@ -80,3 +80,38 @@ def test_unrelated_write_is_rejected():
 def test_malformed_snapshot_is_an_evaluator_error():
     with pytest.raises(ValueError, match="duplicate"):
         check_booking([PRIOR], rows() + [PRIOR], EXPECTED, ACK)
+
+
+def window():
+    events = [{"expected": {**EXPECTED, "customerName": name}, "response": ACK,
+               "offered_monotonic_s": 10, "acknowledgement_monotonic_s": 10.2}
+              for name in ("baseline", "scheduled")]
+    before = {"reservations": [PRIOR], "capacity": [{"rooms": 200}]}
+    after = {"reservations": [PRIOR, *[{"_id": str(i), **e["expected"]} for i, e in enumerate(events)]],
+             "capacity": before["capacity"]}
+    return before, after, events
+
+
+def test_window_accounts_for_every_expected_write():
+    before, after, events = window()
+    assert all(v["accepted"] for v in check_window(before, after, after, events))
+
+
+@pytest.mark.parametrize("damage", ["lost_baseline", "duplicate", "stray", "prior_type", "capacity", "unstable"])
+def test_window_damage_invalidates_the_episode(damage):
+    before, after, events = window()
+    after = copy.deepcopy(after)
+    if damage == "lost_baseline":
+        after["reservations"].pop(1)
+    elif damage == "duplicate":
+        after["reservations"].append({**after["reservations"][1], "_id": "duplicate"})
+    elif damage == "stray":
+        after["reservations"].append({"_id": "stray", **EXPECTED})
+    elif damage == "prior_type":
+        after["reservations"][0]["number"] = True
+    elif damage == "capacity":
+        after["capacity"][0]["rooms"] = 199
+    immediate = before if damage == "unstable" else after
+    verdicts = check_window(before, immediate, after, events)
+    assert not any(v["accepted"] for v in verdicts)
+    assert not any(v["invariant_ok"] for v in verdicts)
