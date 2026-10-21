@@ -1,51 +1,19 @@
 import argparse
 import hashlib
-import http.client
 import json
 import signal
 import subprocess
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 import uuid
 from pathlib import Path
 
-from service_operator import workflow
+from service_operator import hotel, http_probe, workflow
 from service_operator.workflow import check_booking
+from service_operator.hotel import IMAGES, SEED, SNAPSHOT_JS
+from service_operator.http_probe import request
 
 
-IMAGES = {
-    "app": {
-        "ref": "ghcr.io/sregym/hotel-reservation@sha256:7918331dfec6fa3d71d0af5d92ff3696f85a6f620d876c7bf78b85d852d7c299",
-        "platform": "linux/amd64", "observed_tag": "latest",
-    },
-    "mongo": {
-        "ref": "mongo@sha256:aa3f99f22e195adee9071152b4c87536f795c21ca233eeb3a28ca33af72ec1d6",
-        "platform": "linux/arm64/v8", "observed_tag": "4.4.6",
-    },
-    "consul": {
-        "ref": "hashicorp/consul@sha256:fbed4e2bd2d25f2aefb5a6ee68ead0b7fdb34bad14ce62889063bfb666b02c87",
-        "platform": "linux/arm64", "observed_tag": "1.22.3",
-    },
-    "memcached": {
-        "ref": "memcached@sha256:b263323af06e550df9becd8c2cf8450400be7ae4381392593565dc8247bb230f",
-        "platform": "linux/arm64/v8", "observed_tag": "1.6.39-alpine",
-    },
-    "jaeger": {
-        "ref": "jaegertracing/all-in-one@sha256:84d2b9664cea496af47fb58077319b55569542804884041a87b175475e183628",
-        "platform": "linux/arm64", "observed_tag": "1.57",
-    },
-}
-SEED = {"hotelId": "4", "customerName": "Alice", "inDate": "2015-04-09",
-        "outDate": "2015-04-10", "number": 1}
-SNAPSHOT_JS = (
-    'var d=db.getSiblingDB("reservation-db");'
-    'function rows(c){return d.getCollection(c).find().sort({_id:1}).toArray().map(function(r){'
-    'if(!(r._id instanceof ObjectId)){throw new Error("unexpected id type");}'
-    'r._id=r._id.str;return r;});}'
-    'print(JSON.stringify({reservations:rows("reservation"),capacity:rows("number")}));'
-)
 
 
 def write_json(path, value):
@@ -94,20 +62,6 @@ def compose_config(run_id):
     return {"services": services, "volumes": volumes}
 
 
-def request(url, deadline=5):
-    started = time.monotonic()
-    result = {"status": None, "body": None, "deadline_s": deadline}
-    try:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(url, timeout=deadline) as response:
-            result["status"] = response.status
-            result["body"] = json.loads(response.read(65536))
-    except (OSError, ValueError, http.client.HTTPException, urllib.error.URLError) as exc:
-        result["error"] = f"{type(exc).__name__}: {exc}"
-        if isinstance(exc, urllib.error.HTTPError):
-            result["status"] = exc.code
-    result["elapsed_s"] = time.monotonic() - started
-    return result
 
 
 def audit(output, context):
@@ -118,7 +72,7 @@ def audit(output, context):
     result = {"run_id": run_id, "status": "running", "cycles": []}
     command_count = 0
     source_hashes = {}
-    for source in (Path(__file__), Path(workflow.__file__)):
+    for source in (Path(__file__), Path(workflow.__file__), Path(hotel.__file__), Path(http_probe.__file__)):
         data = source.read_bytes()
         (output / source.name).write_bytes(data)
         source_hashes[source.name] = hashlib.sha256(data).hexdigest()
