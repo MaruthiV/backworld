@@ -26,6 +26,18 @@ MITIGATED = {"rate": {"RATE_BACKEND_QPS_LIMIT": "50", "RATE_QUEUE_CAPACITY": "25
 CATALOG_JS = 'print(JSON.stringify(db.getSiblingDB("profile-db").hotels.find({},{_id:0,id:1,name:1,address:1}).sort({id:1}).toArray()));'
 
 
+def images(availability_build=None):
+    records = copy.deepcopy(hotel.IMAGES)
+    if availability_build is not None:
+        build = json.loads(availability_build.read_text())
+        if build["base_image"] != records["app"]["ref"] or not build["unmodified_binary_matches"]:
+            raise ValueError("availability build is not linked to the pinned original")
+        records["app"] = {"ref": build["image_id"], "local_image_id": build["image_id"],
+                          "platform": "linux/amd64", "availability_patch_sha256": build["patch_sha256"],
+                          "binary_sha256": build["corrected_binary_sha256"]}
+    return records
+
+
 def profile(namespace, aliases, init_scripts):
     objects = hotel.kubernetes_profile(namespace, aliases, probes=False)
     definitions = [(name, "app", "384Mi", ["/go/bin/" + name]) for name in ("geo", "rate", "profile")]

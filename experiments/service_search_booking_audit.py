@@ -14,7 +14,7 @@ from service_operator.kubernetes import LocalCluster, save
 from service_retry_audit import INPUTS, KUBECTL_SHA256, guarded_workload, stop_workload
 
 
-def run(output):
+def run(output, availability_build=None):
     output.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
     runtime = LocalCluster(output, Path("results/service-kube-runtime-20261021/kind"))
@@ -31,8 +31,12 @@ def run(output):
     kubectl = inputs.resolve() / "bin/kubectl"
     if hashlib.sha256(kubectl.read_bytes()).hexdigest() != KUBECTL_SHA256:
         raise ValueError("kubectl pin changed")
-    protocol = Path("docs/SERVICE_SEARCH_BOOKING_PROTOCOL.md").read_bytes()
+    corrected = availability_build is not None
+    image_records = retry.images(availability_build)
+    protocol = Path("docs/SERVICE_AVAILABILITY_PROTOCOL.md" if corrected else "docs/SERVICE_SEARCH_BOOKING_PROTOCOL.md").read_bytes()
     (output / "protocol.txt").write_bytes(protocol)
+    if corrected:
+        (output / "availability-build.json").write_bytes(availability_build.read_bytes())
     recorder = retry.RecordedRequests(output / "metrics.jsonl")
     workload_path = Path("results/service-plan-source-20261019/sregym/sregym/generators/workload/hotel_search.py")
     workload_class = retry.load_workload(workload_path, recorder)
@@ -90,10 +94,10 @@ def run(output):
                 body += part
         (output / (label + "-cache.txt")).write_bytes(body)
 
-    def book(selected, label):
+    def book(selected, label, number=1):
         nonlocal state
         expected = {"hotelId": selected, "customerName": runtime.name + "-" + label,
-                    "inDate": "2015-04-09", "outDate": "2015-04-10", "number": 1}
+                    "inDate": "2015-04-09", "outDate": "2015-04-10", "number": number}
         event = {"label": label, "expected": expected, "before": state, "unix_s": time.time()}
         path = output / (label + "-booking.json")
         save(path, event)
@@ -113,7 +117,7 @@ def run(output):
 
     try:
         runtime.start()
-        runtime.load_images(hotel.IMAGES)
+        runtime.load_images(image_records)
         os.environ["PATH"] = str(kubectl.parent) + os.pathsep + (old_env["PATH"] or "")
         os.environ["KUBECONFIG"] = str(runtime.kubeconfig)
         runtime.kube(["create", "namespace", namespace])
@@ -154,19 +158,44 @@ def run(output):
         remaining_ids = []
         for i in range(3):
             remaining_ids = ids(search("after-first-" + str(i)))
-            require(set(remaining_ids) == set(original[1:]), "first booked hotel was not uniquely filtered")
-        book(remaining_ids[0], "second")
+            expected_ids = set(original) if corrected else set(original[1:])
+            require(set(remaining_ids) == expected_ids, "availability after first booking differs")
+        book(original[1], "second")
         cache("after-second")
         for i in range(3):
-            require(ids(search("after-second-" + str(i))) == [], "two one-room bookings did not cause empty search")
+            expected_ids = set(original) if corrected else set()
+            require(set(ids(search("after-second-" + str(i)))) == expected_ids, "availability after second booking differs")
+        if corrected:
+            book(original[0], "fill-first", 199)
+            cache("fully-booked")
+            for i in range(3):
+                require(set(ids(search("fully-booked-" + str(i)))) == set(original[1:]), "full hotel was still available")
         require(snapshot() == state, "search modified stored state")
         cache("after-cache-delete", clear=True)
         restored = []
         for i in range(3):
-            restored.append(set(ids(search("cache-cleared-" + str(i)))) == set(original))
+            expected_ids = set(original[1:]) if corrected else set(original)
+            restored.append(set(ids(search("cache-cleared-" + str(i)))) == expected_ids)
         cache("after-cleared-searches")
         require(snapshot() == state, "cache deletion changed stored bookings or capacity")
-        require(all(restored), "cache deletion did not restore both hotels")
+        require(all(restored), "availability after cache deletion differs")
+        if corrected:
+            workload.start()
+            time.sleep(10)
+            before = workload.metrics.snapshot()
+            t0 = time.monotonic()
+            time.sleep(10)
+            t1 = time.monotonic()
+            after = workload.metrics.snapshot()
+            time.sleep(4.25)
+            sample = retry.window(recorder.snapshot(), t0, t1, catalog, before, after)
+            save(output / "protected-load.json", {"sample": sample, "start_s": t0, "end_s": t1,
+                 "before_metrics": before, "after_metrics": after})
+            require(retry.healthy(sample, initial=True), "corrected workflow failed healthy protected load")
+            cohort = [event for event in recorder.snapshot() if event["kind"] == "search" and t0 <= event["started_s"] < t1]
+            require(all(set(ids(event["response"])) == set(original[1:]) for event in cohort), "protected load returned a full hotel")
+            stop_workload(workload)
+            require(snapshot() == state, "protected search load changed state")
         save(output / "final-state.json", snapshot())
         save(output / "final-metrics.json", workload.metrics.snapshot())
         save(output / "final-pods.json", json.loads(runtime.kube(["-n", namespace, "get", "pods", "-o", "json"])))
@@ -174,7 +203,7 @@ def run(output):
         save(output / "resources.json", usage)
         require(dict(line.split() for line in usage["memory.events"].splitlines())["oom_kill"] == "0", "node OOM kill")
         result["original_ids"] = original
-        result["status"] = "hypothesis_confirmed"
+        result["status"] = "corrected_workflow_passed" if corrected else "hypothesis_confirmed"
     except BaseException as exc:
         result["status"] = "failed"
         result["error"] = f"{type(exc).__name__}: {exc}"
@@ -192,6 +221,7 @@ def run(output):
             result["collection_error"] = str(exc)
         if workload is not None:
             stop_workload(workload)
+        save(output / "http-events.json", recorder.snapshot())
         if cache_forward is not None:
             cache_forward.stop()
         result["cleanup_ok"] = runtime.close()["ok"]
@@ -210,6 +240,7 @@ def run(output):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--availability-build", type=Path)
     args = parser.parse_args()
 
     def interrupted(signum, frame):
@@ -218,7 +249,7 @@ def main():
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGALRM, interrupted)
     signal.alarm(600)
-    run(args.output.resolve())
+    run(args.output.resolve(), args.availability_build)
 
 
 if __name__ == "__main__":

@@ -68,8 +68,11 @@ def run(args):
     source_dir = output / "source"
     source_dir.mkdir()
     hashes = {}
-    for source in [Path(__file__), args.workload, *[Path(module.__file__) for module in
-                   (hotel, http_probe, kubernetes, retry, workflow)]]:
+    sources = [Path(__file__), args.workload, *[Path(module.__file__) for module in
+               (hotel, http_probe, kubernetes, retry, workflow)]]
+    if args.availability_build:
+        sources += [args.availability_build, Path("patches/hotel-reservation-availability.patch")]
+    for source in sources:
         body = source.read_bytes()
         (source_dir / source.name).write_bytes(body)
         hashes[source.name] = hashlib.sha256(body).hexdigest()
@@ -83,14 +86,20 @@ def run(args):
     if hashlib.sha256(kubectl.read_bytes()).hexdigest() != KUBECTL_SHA256:
         raise ValueError("kubectl binary differs from the pinned release")
     workload_class = retry.load_workload(args.workload, recorder)
+    image_records = retry.images(args.availability_build)
     init_scripts = {name: (args.inputs / f"applications/hotelReservation/k8s-{name}-mongo.sh").read_text()
                     for name in ("geo", "rate")}
-    (output / "protocol.txt").write_bytes(Path("docs/SERVICE_RETRY_PROTOCOL.md").read_bytes())
+    protocol_path = Path("docs/SERVICE_RETRY_PROTOCOL.md" if args.availability_build else
+                         "docs/archive/2026-10-21-service-retry-protocol-v1.md")
+    (output / "protocol.txt").write_bytes(protocol_path.read_bytes())
+    if args.availability_build:
+        (output / "availability-build.json").write_bytes(args.availability_build.read_bytes())
     save(output / "protocol.json", {
-        "version": 1, "scope": "scripted local fit/mechanism control; not the official oracle or an agent score",
+        "version": 2 if args.availability_build else 1,
+        "scope": "scripted local fit/mechanism control; not the official oracle or an agent score",
         "main_revision": "482846e48c6cd7ae1a259d8412ae4ebc76a035bd",
         "application_revision": "2b2f9c6c2e97c44abbfcc44af1cf2f994bbb04f8",
-        "images": hotel.IMAGES, "node_image": kubernetes.NODE_IMAGE, "kind_sha256": kubernetes.KIND_SHA256,
+        "images": image_records, "node_image": kubernetes.NODE_IMAGE, "kind_sha256": kubernetes.KIND_SHA256,
         "kubectl_sha256": KUBECTL_SHA256, "requests_version": requests.__version__, "source_sha256": hashes,
         "node_limits": {"memory_gib": 4, "cpus": 4, "pids": 2048}, "overall_deadline_s": 1500,
         "traffic": {"base_rps": 8, "burst_rps": 40, "burst_s": 10, "workers": 192, "deadline_s": 4},
@@ -250,11 +259,15 @@ def run(args):
         stats_log = (output / "docker-stats.jsonl").open("w")
         stats = subprocess.Popen(runtime.docker + ["stats", runtime.node, "--format", "{{json .}}"],
                                  stdout=stats_log, stderr=subprocess.STDOUT, env=runtime.env)
-        runtime.load_images(hotel.IMAGES)
+        runtime.load_images(image_records)
         os.environ["PATH"] = str(kubectl.parent) + os.pathsep + (old_env["PATH"] or "")
         os.environ["KUBECONFIG"] = str(runtime.kubeconfig)
         install("initial")
         baseline_names = topology("initial")
+        if args.availability_build:
+            actual_hash = runtime.kube(["-n", namespace, "exec", "deployment/reservation", "--", "sha256sum", "/go/bin/reservation"])
+            save(output / "reservation-binary.json", {"sha256sum": actual_hash})
+            require(actual_hash.split()[0] == image_records["app"]["binary_sha256"], "runtime reservation binary differs from build")
         usage("initial")
         current_state = snapshot()
         save(output / "initial-state.json", current_state)
@@ -370,6 +383,7 @@ def main():
     parser.add_argument("--inputs", type=Path, default=Path("results/service-retry-source-20261021"))
     parser.add_argument("--workload", type=Path, default=Path("results/service-plan-source-20261019/sregym/sregym/generators/workload/hotel_search.py"))
     parser.add_argument("--context", default="desktop-linux")
+    parser.add_argument("--availability-build", type=Path)
     args = parser.parse_args()
 
     def interrupted(signum, frame):

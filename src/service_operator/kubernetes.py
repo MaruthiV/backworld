@@ -101,7 +101,15 @@ class LocalCluster:
     def load_images(self, images):
         for role, image in images.items():
             print("loading " + role, flush=True)
-            self.command(self.docker + ["pull", "--platform", image["platform"], image["ref"]], timeout=240)
+            local_id = image.get("local_image_id")
+            if local_id:
+                if image["ref"] != local_id or not local_id.startswith("sha256:") or len(local_id) != 71:
+                    raise ValueError("local image must use its exact content ID")
+                info = json.loads(self.command(self.docker + ["image", "inspect", local_id]))[0]
+                if info["Id"] != local_id or info["Architecture"] != image["platform"].split("/")[1]:
+                    raise ValueError("local image content or platform differs")
+            else:
+                self.command(self.docker + ["pull", "--platform", image["platform"], image["ref"]], timeout=240)
             alias = f"backworld.local/{role}:{self.name}"
             self.command(self.docker + ["tag", image["ref"], alias])
             self.aliases[role] = alias
@@ -113,6 +121,10 @@ class LocalCluster:
                                         "architecture": original["Architecture"]}
             save(self.output / "image-aliases.json", self.image_records)
             self.command([self.kind, "load", "docker-image", alias, "--name", self.name], timeout=180)
+            imported = json.loads(self.command(self.docker + ["exec", self.node, "crictl", "inspecti", alias]))
+            save(self.output / (role + "-runtime-image.json"), imported)
+            if alias not in imported["status"].get("repoTags", []):
+                raise RuntimeError("imported image is not available to Kubernetes: " + alias)
 
     def close(self):
         errors = []

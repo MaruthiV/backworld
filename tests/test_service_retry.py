@@ -1,11 +1,13 @@
 import copy
 import importlib.util
+import json
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from service_operator import retry
+from service_operator.kubernetes import LocalCluster
 
 
 CATALOG = {"7": {"name": "hotel seven", "address": {"lat": 38.02, "lon": -122.09}}}
@@ -137,3 +139,62 @@ def test_unresponsive_stats_process_is_killed_after_timeout():
     stats = Stats()
     module.stop_stats(stats)
     assert stats.terminated and stats.killed
+
+
+@pytest.mark.parametrize("change", ["tag", "content", "platform"])
+def test_local_image_import_rejects_an_unverified_replacement(tmp_path, change):
+    runtime = LocalCluster.__new__(LocalCluster)
+    runtime.docker = ["docker"]
+    image_id = "sha256:" + "a" * 64
+    record = {"ref": image_id, "local_image_id": image_id, "platform": "linux/amd64"}
+    inspected = {"Id": image_id, "Architecture": "amd64"}
+    if change == "tag":
+        record["ref"] = "mutable:latest"
+    elif change == "content":
+        inspected["Id"] = "sha256:" + "b" * 64
+    else:
+        inspected["Architecture"] = "arm64"
+    commands = []
+
+    def command(args):
+        commands.append(args)
+        return json.dumps([inspected])
+
+    runtime.command = command
+    with pytest.raises(ValueError, match="local image"):
+        runtime.load_images({"app": record})
+    assert not any("pull" in args or "tag" in args for args in commands)
+
+
+def test_corrected_image_requires_a_matching_original_rebuild(tmp_path):
+    path = tmp_path / "build.json"
+    path.write_text(json.dumps({"base_image": retry.hotel.IMAGES["app"]["ref"], "unmodified_binary_matches": False}))
+    with pytest.raises(ValueError, match="pinned original"):
+        retry.images(path)
+
+
+def test_successful_import_command_is_not_runtime_image_readiness(tmp_path):
+    runtime = LocalCluster.__new__(LocalCluster)
+    runtime.docker = ["docker"]
+    runtime.name = "owned"
+    runtime.node = "owned-control-plane"
+    runtime.kind = "kind"
+    runtime.output = tmp_path
+    runtime.aliases = {}
+    runtime.image_records = {}
+    image_id = "sha256:" + "a" * 64
+    commands = []
+
+    def command(args, **kwargs):
+        commands.append(args)
+        if "inspecti" in args:
+            return json.dumps({"status": {"repoTags": []}})
+        if "inspect" in args:
+            return json.dumps([{"Id": image_id, "Architecture": "amd64"}])
+        return ""
+
+    runtime.command = command
+    with pytest.raises(RuntimeError, match="not available to Kubernetes"):
+        runtime.load_images({"app": {"ref": image_id, "local_image_id": image_id, "platform": "linux/amd64"}})
+    assert any("load" in args for args in commands)
+    assert any("inspecti" in args for args in commands)
