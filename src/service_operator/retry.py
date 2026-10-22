@@ -169,8 +169,9 @@ def safe_policy(metrics):
 class RecordedRequests:
     RequestException = requests.RequestException
 
-    def __init__(self, output):
+    def __init__(self, output, identify=False):
         self.output = output
+        self.identify = identify
         self.lock = threading.Lock()
         self.events = []
 
@@ -186,6 +187,9 @@ class RecordedRequests:
                  "started_s": time.monotonic(), "started_unix_s": time.time()}
         with self.lock:
             event["id"] = len(self.events)
+            if self.identify:
+                event["request_id"] = "workload-" + str(event["id"])
+                kwargs["headers"] = {**kwargs.get("headers", {}), "X-Backworld-Request": event["request_id"]}
             self.events.append(event)
             self.write("started", event)
         receipt = None

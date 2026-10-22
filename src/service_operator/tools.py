@@ -38,9 +38,9 @@ class ToolInputError(ValueError):
 def contract(profile):
     if profile == "booking":
         return APPS, TOOL_SPEC
-    if profile != "retry":
+    if profile not in ("retry", "pilot"):
         raise ValueError("unknown tool profile")
-    specs = {name: spec for name, spec in TOOL_SPEC.items() if name != "set_selector"}
+    specs = {name: spec for name, spec in TOOL_SPEC.items() if name != "set_selector" or profile == "pilot"}
     specs["wait"] = {"required": ["seconds"], "seconds": [1, 10]}
     specs.update({name: {"required": list(fields)} for name, fields in POLICY_FIELDS.items()})
     specs.update({"metrics": {"required": ["service"]}, "clock": {"required": []}})
@@ -65,8 +65,10 @@ def tool_definitions(profile="booking"):
                     "set_selector": "Replace a Service selector.", "restart": "Request a deployment restart.",
                     "check": "Try a fresh booking and report its HTTP response.", "wait": "Wait for an operation to take effect.",
                     "finish": "Declare the investigation complete."}
-    if profile == "retry":
+    if profile in ("retry", "pilot"):
         properties["restart"]["deployment"]["enum"] = ["frontend", "search", "rate"]
+        if profile == "pilot":
+            properties["set_selector"]["service"]["enum"] = ["frontend", "search", "rate"]
         properties.update({"metrics": {"service": {"type": "string", "enum": ["search", "rate"]}}, "clock": {}})
         descriptions.update({"metrics": "Read current application counters and gauges; counters may reset after rollout.",
                              "clock": "Read elapsed time and remaining action/check budgets.",
@@ -98,7 +100,9 @@ def validate_call(call, profile="booking"):
         key, low, high = ("lines", 1, 40) if name == "logs" else ("seconds", *specs["wait"]["seconds"])
         if type(args[key]) is not int or not low <= args[key] <= high:
             raise ToolInputError("argument is outside its allowed range")
-    if profile == "retry":
+    if profile in ("retry", "pilot"):
+        if name == "set_selector" and args["service"] not in ("frontend", "search", "rate"):
+            raise ToolInputError("selector target is not available")
         if name == "metrics" and args["service"] not in ("search", "rate"):
             raise ToolInputError("metrics service is not available")
         if name == "restart" and args["deployment"] not in ("frontend", "search", "rate"):
@@ -133,8 +137,8 @@ class PublicTools:
         if deadline_s is not None and (type(deadline_s) not in (int, float)
                                       or not math.isfinite(deadline_s) or deadline_s <= 0):
             raise ValueError("episode deadline must be positive and finite")
-        if profile == "retry" and deadline_s is None:
-            raise ValueError("retry episodes require a public deadline")
+        if profile in ("retry", "pilot") and deadline_s is None:
+            raise ValueError("timed episodes require a public deadline")
         self.backend, self.check, self.record = backend, check, record
         self.started, self.max_calls = started, max_calls
         self.calls = 0
@@ -215,7 +219,7 @@ def operator_role(namespace, profile="booking"):
          "subjects": [{"kind": "ServiceAccount", "name": "operator", "namespace": namespace}],
          "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "operator"}},
     ]
-    if profile == "retry":
+    if profile in ("retry", "pilot"):
         rules = objects[1]["rules"]
         rules[0]["verbs"] = ["get", "list"]
         rules[3]["verbs"] = ["get", "list"]
@@ -223,6 +227,9 @@ def operator_role(namespace, profile="booking"):
                    "resourceNames": ["search-metrics", "rate-metrics"]},
                   {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["patch"],
                    "resourceNames": ["frontend", "search", "rate"]}]
+        if profile == "pilot":
+            rules += [{"apiGroups": [""], "resources": ["services"], "verbs": ["patch"],
+                       "resourceNames": ["frontend", "search", "rate"]}]
     return objects
 
 
