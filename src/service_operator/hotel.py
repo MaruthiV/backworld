@@ -85,7 +85,7 @@ def deployment(name, role, alias, memory, command=None):
                      "template": {"metadata": {"labels": labels}, "spec": spec}}}
 
 
-def kubernetes_profile(namespace, aliases):
+def kubernetes_profile(namespace, aliases, *, probes=True):
     objects = []
     definitions = [
         ("consul", "consul", "256Mi", None), ("jaeger", "jaeger", "192Mi", None),
@@ -98,6 +98,8 @@ def kubernetes_profile(namespace, aliases):
         ("false-response", "client", "128Mi", ["python", "-c", FAKE_SERVER]),
     ]
     for name, role, memory, command in definitions:
+        if not probes and name in ("client", "false-response"):
+            continue
         item = deployment(name, role, aliases[role], memory, command)
         item["metadata"]["namespace"] = namespace
         objects.append(item)
