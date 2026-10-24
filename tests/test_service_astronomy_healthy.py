@@ -92,3 +92,35 @@ def test_complete_control_accounts_for_two_writes_and_twenty_continued_reads():
     assert len({request_id for _,_,request_id in calls}) == 25
     assert sum(method == "POST" for method,_,_ in calls) == 2
     assert sorted(v["items"][0]["quantity"] for v in records.values()) == [1, 2]
+
+
+def test_read_only_warmup_handles_late_api_startup():
+    calls, events = [], []
+    def send(method, path, body, request_id):
+        calls.append((method, body))
+        return ack([copy.deepcopy(PRODUCT)]) if len(calls) == 3 else {"status": 503, "error": "starting"}
+    result = probe.warmup(send, lambda user: {"key_type": "none"}, events.append, "0123456789abcdef", interval_s=0)
+    assert result == {"passed": True, "readiness_only": True, "read_attempts": 3, "write_attempts": 0}
+    assert calls == [("GET", None)] * 3
+    assert sum(e["stage"] == "warmup_read" for e in events) == 3
+
+
+def test_warmup_does_not_clear_or_wait_out_nonfresh_carts():
+    calls = []
+    def send(*args):
+        calls.append(args)
+        return ack([copy.deepcopy(PRODUCT)])
+    with pytest.raises(RuntimeError, match="nonfresh"):
+        probe.warmup(send, lambda user: {"key_type": "hash"}, lambda event: None, "0123456789abcdef", interval_s=0)
+    assert len(calls) == 1
+
+
+def test_failed_warmup_is_bounded_without_writes():
+    calls = []
+    def send(*args):
+        calls.append(args)
+        return {"status": 503, "error": "starting"}
+    with pytest.raises(RuntimeError, match="did not become valid"):
+        probe.warmup(send, lambda user: pytest.fail("unready API must not reach writes"),
+                     lambda event: None, "0123456789abcdef", interval_s=0)
+    assert len(calls) == 12 and all(args[0] == "GET" and args[2] is None for args in calls)

@@ -131,11 +131,35 @@ def exercise(send, snapshot, record, run_id, *, interval_s=0.5, settle_s=0.25):
             "both_carts_preserved": retained, "application_or_cluster_cleanup": "external owner must verify"}
 
 
+def warmup(send, snapshot, record, run_id, *, interval_s=0.5):
+    for attempt in range(12):
+        response = send("GET", "/api/products?currencyCode=USD", None, f"{run_id}-warmup-{attempt:02d}")
+        record({"stage": "warmup_read", "attempt": attempt, "response": response})
+        try:
+            catalog_product(response)
+        except ValueError:
+            pass
+        else:
+            try:
+                snapshots = [snapshot("bw-cart-" + run_id + suffix) for suffix in ("-prior", "-current")]
+            except OSError as exc:
+                record({"stage": "warmup_store_error", "error": type(exc).__name__ + ": " + str(exc)})
+            else:
+                record({"stage": "warmup_store", "snapshots": snapshots})
+                if any(s["key_type"] != "none" for s in snapshots):
+                    raise RuntimeError("warmup found nonfresh owned cart IDs")
+                return {"passed": True, "readiness_only": True, "read_attempts": attempt + 1, "write_attempts": 0}
+        if attempt < 11:
+            time.sleep(interval_s)
+    raise RuntimeError("read-only application warmup did not become valid")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--readiness-only", action="store_true")
     args = parser.parse_args()
     if not re.fullmatch(r"bw-astro-[a-f0-9]{10}", args.namespace):
         parser.error("use an explicitly owned bw-astro namespace")
@@ -145,9 +169,11 @@ def main():
     base = f"http://frontend-proxy.{args.namespace}.svc.cluster.local:8080"
     host = f"valkey-cart.{args.namespace}.svc.cluster.local"
     sources = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (Path(__file__), Path(cart.__file__))}
+    wall_limit = 75 if args.readiness_only else 120
     manifest = {"run_id": args.run_id, "namespace": args.namespace,
-        "base": base, "store": host, "source_sha256": sources, "wall_limit_s": 120,
-        "request_limit": 25, "write_attempts": 2, "automatic_write_retries": 0,
+        "base": base, "store": host, "source_sha256": sources, "wall_limit_s": wall_limit,
+        "request_limit": 12 if args.readiness_only else 25, "write_attempts": 0 if args.readiness_only else 2,
+        "automatic_write_retries": 0, "readiness_only": args.readiness_only,
         "scope": "trusted private helper in an already owned dedicated cluster; no provisioning"}
     (args.output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
@@ -160,13 +186,14 @@ def main():
         print(json.dumps(event), flush=True)
 
     def expired(signum, frame):
-        raise RuntimeError("healthy control exceeded 120 seconds")
+        raise RuntimeError("private control exceeded its wall deadline")
 
     signal.signal(signal.SIGALRM, expired)
-    signal.alarm(120)
+    signal.alarm(wall_limit)
     try:
         record({"stage": "manifest", "manifest": manifest})
-        result = exercise(lambda *a: request(base, *a), lambda user: cart.snapshot(host, user), record, args.run_id)
+        control = warmup if args.readiness_only else exercise
+        result = control(lambda *a: request(base, *a), lambda user: cart.snapshot(host, user), record, args.run_id)
     except Exception as exc:
         result = {"passed": False, "error": type(exc).__name__ + ": " + str(exc), "write_retries": 0}
         record({"stage": "failed", **result})
