@@ -182,11 +182,48 @@ def test_runtime_image_identity_is_checked_beyond_pod_image_text():
     digest = "sha256:" + "a" * 64
     image = "example/app@" + digest
     pod = {"metadata": {}, "spec": {"containers": [{"name": "app", "image": image}]},
-           "status": {"phase": "Running", "containerStatuses": [{"name": "app", "imageID": "containerd://" + digest}]}}
+           "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}],
+                      "containerStatuses": [{"name": "app", "imageID": "containerd://" + digest}]}}
     host.validate_pod(pod, {image: {digest}})
     pod["status"]["containerStatuses"][0]["imageID"] = "containerd://sha256:" + "b" * 64
     with pytest.raises(ValueError, match="image ID"):
         host.validate_pod(pod, {image: {digest}})
+
+
+@pytest.mark.parametrize("damage", ["unready", "oom", "missing_service", "stale_controller"])
+def test_application_health_is_rechecked_after_successful_requests(damage):
+    digest = "sha256:" + "a" * 64
+    image, images = "example/app@" + digest, {"example/app@" + digest: {digest}}
+    data = {key: [] for key in ("deployments", "daemonsets", "pods", "services", "endpointslices", "replicasets")}
+    for name in ("frontend-proxy", "frontend", "cart", "product-catalog", "valkey-cart"):
+        service, slices, pods, replicasets, deployments = topology()
+        service["metadata"].update(name=name, uid="service-" + name)
+        slices[0]["metadata"]["labels"]["kubernetes.io/service-name"] = name
+        slices[0]["metadata"]["ownerReferences"][0]["uid"] = "service-" + name
+        slices[0]["endpoints"][0]["targetRef"]["uid"] = "pod-" + name
+        pods[0]["metadata"]["uid"] = "pod-" + name
+        pods[0]["metadata"]["ownerReferences"][0]["uid"] = "replicaset-" + name
+        pods[0]["spec"] = {"containers": [{"name": "app", "image": image}]}
+        pods[0]["status"].update(phase="Running", containerStatuses=[{"name": "app", "imageID": image}])
+        replicasets[0]["metadata"]["uid"] = "replicaset-" + name
+        replicasets[0]["metadata"]["ownerReferences"][0]["uid"] = "deployment-" + name
+        deployment = deployments[0]
+        deployment.update(kind="Deployment", status={"observedGeneration": 1, "replicas": 1, "updatedReplicas": 1, "readyReplicas": 1, "availableReplicas": 1})
+        deployment["metadata"].update(name=name, uid="deployment-" + name, generation=1)
+        deployment["spec"]["replicas"] = 1
+        for key, values in (("services", [service]), ("endpointslices", slices), ("pods", pods), ("replicasets", replicasets), ("deployments", deployments)):
+            data[key].extend(values)
+    host.validate_application(data, images)
+    if damage == "unready":
+        next(c for c in data["pods"][0]["status"]["conditions"] if c["type"] == "Ready")["status"] = "False"
+    elif damage == "oom":
+        data["pods"][0]["status"]["containerStatuses"][0]["lastState"] = {"terminated": {"reason": "OOMKilled"}}
+    elif damage == "missing_service":
+        data["services"] = [s for s in data["services"] if s["metadata"]["name"] != "cart"]
+    else:
+        data["deployments"][0]["status"]["observedGeneration"] = 0
+    with pytest.raises(ValueError):
+        host.validate_application(data, images)
 
 
 def test_independent_one_item_encoder_matches_literal_wire():

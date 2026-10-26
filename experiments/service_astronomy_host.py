@@ -11,7 +11,7 @@ import time
 import uuid
 from pathlib import Path
 
-from service_operator.astronomy_host import KubeControl, audit_helper, controller_ready, identity, memory_bytes, owned, validate_pod, validate_routing
+from service_operator.astronomy_host import KubeControl, audit_helper, controller_ready, identity, memory_bytes, owned, validate_application, validate_pod
 
 
 TOOL_SHA256 = {
@@ -244,11 +244,7 @@ def run(bundle, output, docker_context, host_id):
                     raise TimeoutError("application controllers did not become current/ready")
                 time.sleep(3)
             data = inventory(folder, "before")
-            for pod in data["pods"]:
-                validate_pod(pod, images)
-            for service in data["services"]:
-                if service["metadata"]["name"] in ("frontend-proxy", "frontend", "cart", "product-catalog", "valkey-cart"):
-                    validate_routing(service, data["endpointslices"], data["pods"], data["replicasets"], data["deployments"])
+            validate_application(data, images)
             actor.create(control)
             job_plan = next(o for o in control if o["kind"] == "Job")
             deadline = time.monotonic() + 330
@@ -272,8 +268,8 @@ def run(bundle, output, docker_context, host_id):
                 (folder / (container_name + ".jsonl")).write_text(logs[container_name])
             validate_pod(pod, images)
             verdict = audit_helper(logs["check"], pod, job, run_id, manifest["application_namespace"], manifest["source_hashes"])
+            validate_application(inventory(folder, "after"), images)
             result["cycles"].append({"cycle": cycle, "namespace_uid": uid, "verdict": verdict})
-            inventory(folder, "after")
             command(docker + ["stats", "--no-stream", "--format", "{{json .}}", node_id])
             roots = [next(o for o in control if o["kind"] == "Namespace"), namespace,
                      *[o for o in app if o["kind"] == "ClusterRoleBinding"], *[o for o in app if o["kind"] == "ClusterRole"]]

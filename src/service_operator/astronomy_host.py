@@ -73,6 +73,8 @@ def controller_ready(obj):
 def validate_pod(pod, images):
     if pod.get("metadata", {}).get("deletionTimestamp") or pod.get("status", {}).get("phase") not in ("Running", "Succeeded"):
         raise ValueError("pod is not current and running/completed")
+    if pod["status"]["phase"] == "Running" and not any(c.get("type") == "Ready" and c.get("status") == "True" for c in pod["status"].get("conditions", [])):
+        raise ValueError("running pod is not Ready")
     for group, status_key in (("containers", "containerStatuses"), ("initContainers", "initContainerStatuses")):
         expected = {c["name"]: c["image"] for c in pod["spec"].get(group, [])}
         statuses = pod["status"].get(status_key, [])
@@ -85,6 +87,19 @@ def validate_pod(pod, images):
                 raise ValueError("runtime image ID differs from the pinned platform")
             if status.get("lastState", {}).get("terminated", {}).get("reason") == "OOMKilled":
                 raise ValueError("pod has an OOM failure")
+
+
+def validate_application(data, images):
+    workloads = data["deployments"] + data["daemonsets"]
+    if not workloads or not all(controller_ready(w) for w in workloads):
+        raise ValueError("application controllers are not current/ready")
+    for pod in data["pods"]:
+        validate_pod(pod, images)
+    for name in ("frontend-proxy", "frontend", "cart", "product-catalog", "valkey-cart"):
+        services = [s for s in data["services"] if s["metadata"]["name"] == name]
+        if len(services) != 1:
+            raise ValueError("workflow Service is missing or duplicated: " + name)
+        validate_routing(services[0], data["endpointslices"], data["pods"], data["replicasets"], data["deployments"])
 
 
 def validate_routing(service, slices, pods, replicasets, deployments):
