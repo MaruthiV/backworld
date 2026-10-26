@@ -32,6 +32,23 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, allow_nan=False)
 
 
+def limit_flagd_files(application):
+    targets = [c for o in application["items"] if o["kind"] == "Deployment" and o["metadata"]["name"] == "flagd"
+               for c in o["spec"]["template"]["spec"]["containers"] if c["name"] == "flagd-ui"]
+    if len(targets) != 1:
+        raise ValueError("expected exactly one flagd-ui sidecar")
+    target = targets[0]
+    image = "ghcr.io/open-telemetry/demo@sha256:0738a32cecf129842d99843f470cfdb4091b9ff5b252d70b9850d5e24e82b438"
+    if target["image"] != image or "command" in target or "args" in target:
+        raise ValueError("flagd-ui image or startup command differs from the checked profile")
+    if target.get("resources", {}).get("limits", {}).get("memory") != "250Mi":
+        raise ValueError("file-limit correction requires the original 250Mi profile")
+    command = ["sh", "-c", "ulimit -n 65536 && exec /app/bin/server"]
+    target["command"] = command
+    return {"resource": "Deployment/flagd", "container": "flagd-ui", "field": "command", "before": None,
+            "after": command, "upstream_fix": "https://github.com/open-telemetry/opentelemetry-demo/commit/7fd8616b9249fc5b4f2056406174a88f0d71a112"}
+
+
 def identity(obj):
     resource, prefix, namespaced = RESOURCES[(obj["apiVersion"], obj["kind"])]
     name, namespace = obj["metadata"]["name"], obj["metadata"].get("namespace")

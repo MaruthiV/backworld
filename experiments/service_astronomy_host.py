@@ -11,7 +11,7 @@ import time
 import uuid
 from pathlib import Path
 
-from service_operator.astronomy_host import KubeControl, audit_helper, controller_ready, identity, memory_bytes, owned, validate_application, validate_pod
+from service_operator.astronomy_host import KubeControl, audit_helper, controller_ready, identity, limit_flagd_files, memory_bytes, owned, validate_application, validate_pod
 
 
 TOOL_SHA256 = {
@@ -29,7 +29,7 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def prepare(inputs, tools, output):
+def prepare(inputs, tools, output, *, limit_flagd=False):
     output.mkdir(parents=True, exist_ok=False)
     summary = json.loads((inputs / "package-summary.json").read_text())
     for name, expected in summary["files_sha256"].items():
@@ -62,6 +62,7 @@ def prepare(inputs, tools, output):
         return value
 
     app = rewrite(json.loads((inputs / "application-pinned.json").read_text()))
+    profile_changes = [limit_flagd_files(app)] if limit_flagd else []
     control = rewrite(json.loads((inputs / "private-control.json").read_text()))
     config = next(o for o in control["items"] if o["kind"] == "ConfigMap")
     config["data"] = {"cart.py": (workspace / sources[0]).read_text(), "probe.py": (workspace / sources[2]).read_text()}
@@ -77,6 +78,7 @@ def prepare(inputs, tools, output):
     shutil.copyfile(inputs / "image-lock.json", output / "image-lock.json")
     files = sources + list(TOOL_SHA256) + ["application.json", "control.json", "image-lock.json"]
     manifest = {"version": 1, "status": "prepared; not executed", "run_id": run_id,
+                "profile_changes": profile_changes,
                 "application_namespace": namespace, "private_namespace": private, "cycles": 2,
                 "files_sha256": {name: sha(output / name) for name in files},
                 "source_hashes": {"cart.py": sha(workspace / sources[0]), "probe.py": sha(workspace / sources[2])},
@@ -358,6 +360,7 @@ def main():
     prep.add_argument("--inputs", type=Path, required=True)
     prep.add_argument("--tools", type=Path, required=True)
     prep.add_argument("--output", type=Path, required=True)
+    prep.add_argument("--limit-flagd-files", action="store_true")
     execute = sub.add_parser("run")
     execute.add_argument("--bundle", type=Path, required=True)
     execute.add_argument("--output", type=Path, required=True)
@@ -366,7 +369,7 @@ def main():
     execute.add_argument("--execute", action="store_true")
     args = parser.parse_args()
     if args.mode == "prepare":
-        print(json.dumps(prepare(args.inputs.resolve(), args.tools.resolve(), args.output.resolve()), indent=2))
+        print(json.dumps(prepare(args.inputs.resolve(), args.tools.resolve(), args.output.resolve(), limit_flagd=args.limit_flagd_files), indent=2))
     else:
         if not args.execute:
             parser.error("run requires --execute on an explicitly owned approved host")

@@ -138,6 +138,42 @@ def test_stale_controller_generation_cannot_be_ready():
     assert host.controller_ready(value)
 
 
+def flagd_application():
+    sidecar = {"name": "flagd-ui", "image": "ghcr.io/open-telemetry/demo@sha256:0738a32cecf129842d99843f470cfdb4091b9ff5b252d70b9850d5e24e82b438",
+               "resources": {"limits": {"memory": "250Mi"}}}
+    return {"items": [{"kind": "Deployment", "metadata": {"name": "flagd"},
+                       "spec": {"template": {"spec": {"containers": [{"name": "flagd", "image": "unchanged"}, sidecar]}}}}]}
+
+
+def test_editor_correction_preserves_image_memory_and_other_containers():
+    app = flagd_application()
+    original = copy.deepcopy(app)
+    change = host.limit_flagd_files(app)
+    sidecar = app["items"][0]["spec"]["template"]["spec"]["containers"][1]
+    assert sidecar.pop("command") == ["sh", "-c", "ulimit -n 65536 && exec /app/bin/server"]
+    assert app == original
+    assert change["before"] is None and change["container"] == "flagd-ui"
+
+
+@pytest.mark.parametrize("damage", ["image", "command", "args", "memory", "missing", "duplicate"])
+def test_editor_correction_refuses_unchecked_startup_profiles(damage):
+    app = flagd_application()
+    containers = app["items"][0]["spec"]["template"]["spec"]["containers"]
+    sidecar = containers[1]
+    if damage in ("image", "command", "args"):
+        sidecar[damage] = "different" if damage == "image" else []
+    elif damage == "memory":
+        sidecar["resources"]["limits"]["memory"] = "1Gi"
+    elif damage == "missing":
+        containers.pop()
+    else:
+        containers.append(copy.deepcopy(sidecar))
+    original = copy.deepcopy(app)
+    with pytest.raises(ValueError):
+        host.limit_flagd_files(app)
+    assert app == original
+
+
 def topology():
     template = {"metadata": {"labels": {"app": "frontend"}}, "spec": {"containers": [{"name": "frontend", "image": "pinned"}]}}
     deployment = {"metadata": {"name": "frontend", "uid": "deployment"}, "spec": {"template": copy.deepcopy(template)}}
