@@ -174,6 +174,89 @@ def test_editor_correction_refuses_unchecked_startup_profiles(damage):
     assert app == original
 
 
+def editor_observations():
+    return {"limits": "Limit                     Soft Limit           Hard Limit           Units\n"
+                      "Max open files            65536                65536                files\n",
+            "memory.max": "262144000\n", "memory.current": "200000000\n", "memory.peak": "234524672\n",
+            "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n"}
+
+
+def test_editor_runtime_checks_pid1_limits_and_preserves_kernel_peak():
+    raw = editor_observations()
+    raw["memory.peak"] = "262144001\n"
+    result = host.editor_runtime(raw, 262144000, 65536)
+    assert result["pid1_nofile_soft"] == result["pid1_nofile_hard"] == 65536
+    assert result["memory_bytes"] == {"max": 262144000, "current": 200000000, "peak": 262144001}
+    assert result["memory_events"]["oom_kill"] == 0
+
+
+@pytest.mark.parametrize("damage", ["uncapped", "missing_limits", "duplicate_limits", "raised_memory", "unlimited_memory",
+                                   "invalid_peak", "missing_events", "duplicate_event", "invalid_event", "oom", "oom_kill"])
+def test_editor_runtime_refuses_unverified_limits_and_oom_evidence(damage):
+    raw = editor_observations()
+    if damage == "uncapped":
+        raw["limits"] = raw["limits"].replace("65536", "1073741816")
+    elif damage == "missing_limits":
+        raw["limits"] = "Max address space         unlimited            unlimited            bytes\n"
+    elif damage == "duplicate_limits":
+        raw["limits"] *= 2
+    elif damage in ("raised_memory", "unlimited_memory"):
+        raw["memory.max"] = "1073741824\n" if damage == "raised_memory" else "max\n"
+    elif damage == "invalid_peak":
+        raw["memory.peak"] = "-1\n"
+    elif damage == "missing_events":
+        raw["memory.events"] = "max 0\n"
+    elif damage == "duplicate_event":
+        raw["memory.events"] += "oom 0\n"
+    elif damage == "invalid_event":
+        raw["memory.events"] += "high -1\n"
+    else:
+        raw["memory.events"] = raw["memory.events"].replace(damage + " 0", damage + " 1")
+    with pytest.raises(ValueError):
+        host.editor_runtime(raw, 262144000, 65536)
+
+
+@pytest.mark.parametrize("damage", [None, "uid", "container", "restart", "oom", "read_failure"])
+def test_editor_receipt_keeps_raw_evidence_and_rejects_process_races(tmp_path, damage):
+    app = flagd_application()
+    host.limit_flagd_files(app)
+    pod = {"metadata": {"name": "flagd-owned", "namespace": NAMESPACE, "uid": "original"},
+           "spec": {"containers": copy.deepcopy(app["items"][0]["spec"]["template"]["spec"]["containers"])},
+           "status": {"containerStatuses": [{"name": "flagd-ui", "containerID": "containerd://original",
+                                             "imageID": "pinned", "restartCount": 0, "state": {"running": {}}}]}}
+    raw = editor_observations()
+    if damage == "oom":
+        raw["memory.events"] = raw["memory.events"].replace("oom_kill 0", "oom_kill 1")
+    paths = {"/proc/1/limits": raw["limits"], **{"/sys/fs/cgroup/" + key: value for key, value in raw.items() if key != "limits"}}
+    calls = []
+    def command(args):
+        calls.append(args)
+        assert args[:len(PREFIX)] == PREFIX
+        if args[len(PREFIX)] == "exec":
+            assert args[-3:-1] == ["--", "cat"]
+            if damage == "read_failure" and args[-1].endswith("memory.peak"):
+                raise TimeoutError("runtime read failed")
+            return paths[args[-1]]
+        current = copy.deepcopy(pod)
+        if damage == "uid":
+            current["metadata"]["uid"] = "replacement"
+        elif damage == "container":
+            current["status"]["containerStatuses"][0]["containerID"] = "containerd://replacement"
+        elif damage == "restart":
+            current["status"]["containerStatuses"][0]["restartCount"] = 1
+        return json.dumps(current)
+    if damage is None:
+        result = runner.record_editor(command, PREFIX, {"pods": [pod]}, app["items"], tmp_path, "after")
+        assert result["values"]["pid1_nofile_soft"] == 65536
+    else:
+        with pytest.raises((ValueError, TimeoutError)):
+            runner.record_editor(command, PREFIX, {"pods": [pod]}, app["items"], tmp_path, "after")
+    receipt = json.loads((tmp_path / "after-editor-runtime.json").read_text())
+    assert receipt["pod_uid"] == "original" and receipt["raw"]["limits"] == raw["limits"]
+    assert ("error" in receipt) == (damage is not None)
+    assert sum(args[-1] == "/proc/1/limits" for args in calls) == 1
+
+
 def topology():
     template = {"metadata": {"labels": {"app": "frontend"}}, "spec": {"containers": [{"name": "frontend", "image": "pinned"}]}}
     deployment = {"metadata": {"name": "frontend", "uid": "deployment"}, "spec": {"template": copy.deepcopy(template)}}

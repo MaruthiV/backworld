@@ -11,7 +11,7 @@ import time
 import uuid
 from pathlib import Path
 
-from service_operator.astronomy_host import KubeControl, audit_helper, controller_ready, identity, limit_flagd_files, memory_bytes, owned, validate_application, validate_pod
+from service_operator.astronomy_host import KubeControl, audit_helper, controller_ready, editor_runtime, identity, limit_flagd_files, memory_bytes, owned, validate_application, validate_pod
 
 
 TOOL_SHA256 = {
@@ -123,6 +123,39 @@ class Commands:
         if check and result.returncode:
             raise RuntimeError("command failed; see " + str(prefix))
         return result.stdout
+
+
+def record_editor(command, kube, data, planned, folder, phase):
+    targets = [pod for pod in data["pods"] if any(c["name"] == "flagd-ui" for c in pod["spec"]["containers"])]
+    if len(targets) != 1:
+        raise ValueError("expected exactly one running editor Pod")
+    pod = targets[0]
+    namespace, name = pod["metadata"]["namespace"], pod["metadata"]["name"]
+    status = next(c for c in pod["status"]["containerStatuses"] if c["name"] == "flagd-ui")
+    container = next(c for obj in planned if obj["kind"] == "Deployment" and obj["metadata"]["name"] == "flagd"
+                     for c in obj["spec"]["template"]["spec"]["containers"] if c["name"] == "flagd-ui")
+    receipt = {"pod_uid": pod["metadata"]["uid"], "pod": name, "namespace": namespace,
+               "container_id": status["containerID"], "image_id": status["imageID"],
+               "restart_count": status["restartCount"], "started_unix_s": time.time(), "raw": {}}
+    try:
+        for key, path in [("limits", "/proc/1/limits"), *[("memory." + field, "/sys/fs/cgroup/memory." + field)
+                                                       for field in ("max", "current", "peak", "events")]]:
+            receipt["raw"][key] = command(kube + ["exec", name, "--namespace", namespace, "--container", "flagd-ui", "--", "cat", path])
+        current = json.loads(command(kube + ["get", "pod", name, "--namespace", namespace, "-o", "json"]))
+        actual = next(c for c in current["status"]["containerStatuses"] if c["name"] == "flagd-ui")
+        if (current["metadata"]["uid"] != receipt["pod_uid"]
+                or any(actual[key] != status[key] for key in ("containerID", "imageID", "restartCount"))
+                or "running" not in actual.get("state", {})):
+            raise ValueError("editor process changed during runtime observation")
+        file_limit = 65536 if container.get("command") == ["sh", "-c", "ulimit -n 65536 && exec /app/bin/server"] else None
+        receipt["values"] = editor_runtime(receipt["raw"], memory_bytes(container["resources"]["limits"]["memory"]), file_limit)
+    except Exception as exc:
+        receipt["error"] = type(exc).__name__ + ": " + str(exc)
+        raise
+    finally:
+        receipt["finished_unix_s"] = time.time()
+        save(folder / (phase + "-editor-runtime.json"), receipt)
+    return receipt
 
 
 def run(bundle, output, docker_context, host_id):
@@ -247,6 +280,7 @@ def run(bundle, output, docker_context, host_id):
                 time.sleep(3)
             data = inventory(folder, "before")
             validate_application(data, images)
+            record_editor(command, kube, data, app, folder, "before")
             actor.create(control)
             job_plan = next(o for o in control if o["kind"] == "Job")
             deadline = time.monotonic() + 330
@@ -270,7 +304,9 @@ def run(bundle, output, docker_context, host_id):
                 (folder / (container_name + ".jsonl")).write_text(logs[container_name])
             validate_pod(pod, images)
             verdict = audit_helper(logs["check"], pod, job, run_id, manifest["application_namespace"], manifest["source_hashes"])
-            validate_application(inventory(folder, "after"), images)
+            data = inventory(folder, "after")
+            validate_application(data, images)
+            record_editor(command, kube, data, app, folder, "after")
             result["cycles"].append({"cycle": cycle, "namespace_uid": uid, "verdict": verdict})
             command(docker + ["stats", "--no-stream", "--format", "{{json .}}", node_id])
             roots = [next(o for o in control if o["kind"] == "Namespace"), namespace,

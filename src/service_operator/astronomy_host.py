@@ -49,6 +49,33 @@ def limit_flagd_files(application):
             "after": command, "upstream_fix": "https://github.com/open-telemetry/opentelemetry-demo/commit/7fd8616b9249fc5b4f2056406174a88f0d71a112"}
 
 
+def editor_runtime(raw, memory_limit, file_limit=None):
+    rows = re.findall(r"^Max open files\s+(\d+|unlimited)\s+(\d+|unlimited)\s+files\s*$", raw["limits"], re.MULTILINE)
+    if len(rows) != 1:
+        raise ValueError("editor PID1 open-file limits are missing or ambiguous")
+    soft, hard = [None if value == "unlimited" else int(value) for value in rows[0]]
+    if file_limit is not None and soft != file_limit:
+        raise ValueError("editor PID1 file limit does not match the launcher correction")
+    memory = {}
+    for name in ("max", "current", "peak"):
+        value = raw["memory." + name].strip()
+        if not re.fullmatch(r"[0-9]+", value):
+            raise ValueError("editor memory observation is not finite and nonnegative")
+        memory[name] = int(value)
+    if memory["max"] != memory_limit:
+        raise ValueError("editor cgroup memory limit differs from the declared profile")
+    events = {}
+    for line in raw["memory.events"].splitlines():
+        match = re.fullmatch(r"([a-z_]+)\s+([0-9]+)", line)
+        if not match or match[1] in events:
+            raise ValueError("editor memory events are malformed or duplicated")
+        events[match[1]] = int(match[2])
+    if not {"oom", "oom_kill"} <= events.keys() or events["oom"] or events["oom_kill"]:
+        raise ValueError("editor memory events are missing or show OOM")
+    return {"pid1_nofile_soft": soft, "pid1_nofile_hard": hard,
+            "memory_bytes": memory, "memory_events": events}
+
+
 def identity(obj):
     resource, prefix, namespaced = RESOURCES[(obj["apiVersion"], obj["kind"])]
     name, namespace = obj["metadata"]["name"], obj["metadata"].get("namespace")
