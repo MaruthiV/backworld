@@ -9,6 +9,12 @@ APPS = ("frontend", "search", "user", "reservation", "consul", "jaeger",
         "memcached-reserve", "mongodb-user", "mongodb-reservation")
 RETRY_APPS = APPS + ("geo", "rate", "profile", "mongodb-geo", "mongodb-rate", "mongodb-profile",
                      "memcached-rate", "memcached-profile")
+SELECTOR_APPS = {
+    "selector_hotel": RETRY_APPS,
+    "selector_shop": ("accounting", "ad", "cart", "checkout", "currency", "email", "flagd", "fraud-detection",
+                      "frontend", "frontend-proxy", "image-provider", "kafka", "llm", "load-generator", "payment",
+                      "postgresql", "product-catalog", "product-reviews", "quote", "recommendation", "shipping", "valkey-cart"),
+}
 POLICY_FIELDS = {
     "configure_rate": {"qps_limit": ("RATE_BACKEND_QPS_LIMIT", "integer", 1, 500),
                        "queue_capacity": ("RATE_QUEUE_CAPACITY", "integer", 1, 256)},
@@ -38,6 +44,9 @@ class ToolInputError(ValueError):
 def contract(profile):
     if profile == "booking":
         return APPS, TOOL_SPEC
+    if profile in SELECTOR_APPS:
+        return SELECTOR_APPS[profile], {**TOOL_SPEC, "wait": {"required": ["seconds"], "seconds": [1, 10]},
+                                        "clock": {"required": []}}
     if profile not in ("retry", "pilot"):
         raise ValueError("unknown tool profile")
     specs = {name: spec for name, spec in TOOL_SPEC.items() if name != "set_selector" or profile == "pilot"}
@@ -65,6 +74,12 @@ def tool_definitions(profile="booking"):
                     "set_selector": "Replace a Service selector.", "restart": "Request a deployment restart.",
                     "check": "Try a fresh booking and report its HTTP response.", "wait": "Wait for an operation to take effect.",
                     "finish": "Declare the investigation complete."}
+    if profile in SELECTOR_APPS:
+        properties["restart"]["deployment"]["enum"] = ["frontend"]
+        properties["set_selector"]["service"]["enum"] = ["frontend"]
+        properties["clock"] = {}
+        descriptions["clock"] = "Read elapsed time and remaining action/check budgets."
+        descriptions["check"] = "Try one ordinary application workflow; report HTTP responses without a private verdict."
     if profile in ("retry", "pilot"):
         properties["restart"]["deployment"]["enum"] = ["frontend", "search", "rate"]
         if profile == "pilot":
@@ -100,6 +115,9 @@ def validate_call(call, profile="booking"):
         key, low, high = ("lines", 1, 40) if name == "logs" else ("seconds", *specs["wait"]["seconds"])
         if type(args[key]) is not int or not low <= args[key] <= high:
             raise ToolInputError("argument is outside its allowed range")
+    if profile in SELECTOR_APPS and name in ("set_selector", "restart"):
+        if args["service" if name == "set_selector" else "deployment"] != "frontend":
+            raise ToolInputError("only the stateless frontend can be changed")
     if profile in ("retry", "pilot"):
         if name == "set_selector" and args["service"] not in ("frontend", "search", "rate"):
             raise ToolInputError("selector target is not available")
@@ -137,7 +155,7 @@ class PublicTools:
         if deadline_s is not None and (type(deadline_s) not in (int, float)
                                       or not math.isfinite(deadline_s) or deadline_s <= 0):
             raise ValueError("episode deadline must be positive and finite")
-        if profile in ("retry", "pilot") and deadline_s is None:
+        if profile in ("retry", "pilot", *SELECTOR_APPS) and deadline_s is None:
             raise ValueError("timed episodes require a public deadline")
         self.backend, self.check, self.record = backend, check, record
         self.started, self.max_calls = started, max_calls
@@ -219,6 +237,12 @@ def operator_role(namespace, profile="booking"):
          "subjects": [{"kind": "ServiceAccount", "name": "operator", "namespace": namespace}],
          "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "operator"}},
     ]
+    if profile in SELECTOR_APPS:
+        rules = objects[1]["rules"]
+        rules[0]["verbs"] = ["get", "list"]
+        rules[3]["verbs"] = ["get", "list"]
+        rules += [{"apiGroups": [group], "resources": [resource], "verbs": ["patch"], "resourceNames": ["frontend"]}
+                  for group, resource in (("", "services"), ("apps", "deployments"))]
     if profile in ("retry", "pilot"):
         rules = objects[1]["rules"]
         rules[0]["verbs"] = ["get", "list"]

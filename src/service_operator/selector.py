@@ -7,6 +7,14 @@ INJECTOR_BLOB = "b38852b4157391857ee0c8f44cdde041c0bc5a3c"
 
 
 def load_selector_functions(path):
+    return _load_functions(path, ("inject_service_wrong_pod_selection", "recover_service_wrong_pod_selection"))
+
+
+def load_wrong_selector_functions(path):
+    return _load_functions(path, ("inject_wrong_service_selector", "recover_wrong_service_selector"))
+
+
+def _load_functions(path, names):
     body = path.read_bytes()
     blob = hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest()
     if blob != INJECTOR_BLOB:
@@ -14,7 +22,6 @@ def load_selector_functions(path):
     tree = ast.parse(body)
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
                and node.name == "VirtualizationFaultInjector")
-    names = ("inject_service_wrong_pod_selection", "recover_service_wrong_pod_selection")
     namespace = {"json": json}
     for name in names:
         method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == name)
