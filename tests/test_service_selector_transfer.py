@@ -134,8 +134,9 @@ def test_http_200_cannot_replace_a_valid_public_workflow(damage):
 
 
 class PublicObservations:
-    def __init__(self, faulty):
+    def __init__(self, faulty, empty_as_null=False):
         self.faulty = faulty
+        self.empty_as_null = empty_as_null
         self.calls = []
 
     def send(self, call):
@@ -148,7 +149,7 @@ class PublicObservations:
             elif args["resource"] == "pods":
                 value = {"pods": [{"uid": "live-frontend", "deleting": False, "conditions": [{"type": "Ready", "status": "True"}]}]}
             elif args["resource"] == "endpoints":
-                value = {"slices": [{"endpoints": [] if self.faulty else [{"conditions": {"ready": True}, "targetRef": {"uid": "live-frontend"}}]}]}
+                value = {"slices": [{"endpoints": (None if self.empty_as_null else []) if self.faulty else [{"conditions": {"ready": True}, "targetRef": {"uid": "live-frontend"}}]}]}
             else:
                 value = {"selector": {"opentelemetry.io/name": "frontend", "mismatch": "extra"}}
         elif name == "set_selector":
@@ -159,9 +160,9 @@ class PublicObservations:
         return {"ok": True, "result": value}
 
 
-@pytest.mark.parametrize("faulty", [False, True])
-def test_public_runbook_investigates_and_repairs_without_a_private_case(faulty):
-    source = PublicObservations(faulty)
+@pytest.mark.parametrize("faulty,empty_as_null", [(False, False), (True, False), (True, True)])
+def test_public_runbook_investigates_and_repairs_without_a_private_case(faulty, empty_as_null):
+    source = PublicObservations(faulty, empty_as_null)
     transfer.investigate(source.send)
     names = [row["tool"] for row in source.calls]
     assert names[-1] == "finish" and names.count("check") == 1

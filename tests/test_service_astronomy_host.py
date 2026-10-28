@@ -275,6 +275,14 @@ def test_workflow_routing_resolves_to_current_deployment_template():
     host.validate_routing(*topology())
 
 
+@pytest.mark.parametrize("endpoints", [[], None])
+def test_empty_endpoint_slice_is_unrouted(endpoints):
+    service, slices, pods, replicasets, deployments = topology()
+    slices[0].update(endpoints=endpoints, ports=None)
+    with pytest.raises(ValueError, match="missing or duplicate endpoints"):
+        host.validate_routing(service, slices, pods, replicasets, deployments)
+
+
 @pytest.mark.parametrize("damage", ["address", "pod_uid", "service_uid", "selector", "unready", "stale_template", "wrong_controller"])
 def test_ready_labels_cannot_hide_stale_or_wrong_routing(damage):
     service, slices, pods, replicasets, deployments = topology()

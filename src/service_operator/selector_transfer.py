@@ -114,7 +114,7 @@ def investigate(send):
 
     def endpoints():
         data = call("inspect", resource="endpoints", name="frontend")
-        return {endpoint.get("targetRef", {}).get("uid") for row in data["slices"] for endpoint in row.get("endpoints", [])
+        return {endpoint.get("targetRef", {}).get("uid") for row in data["slices"] for endpoint in (row.get("endpoints") or [])
                 if endpoint.get("conditions", {}).get("ready") is True}
 
     call("clock")

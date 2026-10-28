@@ -157,7 +157,7 @@ def audit(events, relay_events, run_id):
         raise ValueError("private summary differs from independent journal review")
     probes = [identity for identity, intent in intents.items() if intent["phase"] == "effect_probe"
               and intent["started_s"] >= opened and responses[identity]["finished_s"] <= actor]
-    effect_confirmed = len(probes) >= 2 and all(delivered[i] and not shop_selector.catalog_valid(responses[i]["response"], product)
+    effect_confirmed = len(probes) >= 2 and all(responses[i]["response"].get("admission_id") and not shop_selector.catalog_valid(responses[i]["response"], product)
                                                for i in probes[-2:])
     return {**independent, "http_attempts": len(intents), "relay_admissions": len(admissions),
             "unadmitted_failed_attempts": len(intents) - len(admissions), "exact_writes": len(users),

@@ -50,6 +50,7 @@ class Shop:
     def __init__(self, clock):
         self.clock, self.carts, self.relay = clock, {}, []
         self.broken = self.unadmitted = self.uncertain_write = False
+        self.text_failure = False
         self.writes = []
 
     def snapshot(self, user):
@@ -84,14 +85,17 @@ class Shop:
             value = copy.deepcopy(self.carts[user][0])
             for item in value["items"]:
                 item["product"] = PRODUCT
-        raw = json.dumps(value).encode()
+        raw = b"upstream connection refused" if self.broken and self.text_failure else json.dumps(value).encode()
         self.relay += [{"stage": "started", **admission}, {"stage": "completed", **admission,
                        "status": status, "delivered": True, "body_sha256": hashlib.sha256(raw).hexdigest()}]
         if self.uncertain_write and method == "POST":
             return {"status": None, "body": None, "error": "RemoteDisconnected", "elapsed_s": 0.01,
                     "deadline_s": 5, "request_id": identity}
-        return {"status": status, "body": copy.deepcopy(value), "raw_body_b64": base64.b64encode(raw).decode(),
-                "admission_id": admission["id"], "elapsed_s": 0.01, "deadline_s": 5, "request_id": identity}
+        response = {"status": status, "body": copy.deepcopy(value), "raw_body_b64": base64.b64encode(raw).decode(),
+                    "admission_id": admission["id"], "elapsed_s": 0.01, "deadline_s": 5, "request_id": identity}
+        if self.broken and self.text_failure:
+            response.update(body=None, error="JSONDecodeError: invalid JSON")
+        return response
 
 
 @pytest.fixture
@@ -149,6 +153,15 @@ def test_final_offer_keeps_its_full_deadline_after_admission_closes(environment)
     assert review["offer_end_s"] < last_outcome["finished_s"] <= last_offer["offered_s"] + 5 <= review["ended_s"]
     assert review["loss"]["offered"] == 661 and review["loss"]["failed"] == 0
     assert review["recovered"]
+
+
+def test_admitted_non_json_503_establishes_fault_effect(environment):
+    _, shop, _, _ = environment
+    shop.text_failure = True
+    review = complete(environment, "premature_finish")
+    assert review["fault_effect_confirmed"]
+    assert review["loss"]["failed"] == review["loss"]["offered"]
+    assert review["unadmitted_failed_attempts"] == 0
 
 
 @pytest.mark.parametrize("damage", ["slot", "duplicate_slot", "raw", "wire", "ttl", "relay", "retry", "false_valid", "false_summary", "schedule", "horizon"])

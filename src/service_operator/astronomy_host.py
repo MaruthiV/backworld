@@ -163,7 +163,7 @@ def validate_routing(service, slices, pods, replicasets, deployments):
         owners = endpoint_slice["metadata"].get("ownerReferences", [])
         if not any(o.get("kind") == "Service" and o.get("uid") == service["metadata"]["uid"] for o in owners):
             raise ValueError("EndpointSlice belongs to a different Service")
-        for endpoint in endpoint_slice.get("endpoints", []):
+        for endpoint in (endpoint_slice.get("endpoints") or []):
             conditions = endpoint.get("conditions", {})
             if conditions.get("ready") is not True or conditions.get("terminating") is True:
                 raise ValueError("workflow endpoint is unready or terminating")
