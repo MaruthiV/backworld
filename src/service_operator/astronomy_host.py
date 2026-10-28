@@ -18,6 +18,8 @@ RESOURCES = {
     ("batch/v1", "Job"): ("jobs.batch", "/apis/batch/v1", True),
     ("rbac.authorization.k8s.io/v1", "ClusterRole"): ("clusterroles.rbac.authorization.k8s.io", "/apis/rbac.authorization.k8s.io/v1", False),
     ("rbac.authorization.k8s.io/v1", "ClusterRoleBinding"): ("clusterrolebindings.rbac.authorization.k8s.io", "/apis/rbac.authorization.k8s.io/v1", False),
+    ("rbac.authorization.k8s.io/v1", "Role"): ("roles.rbac.authorization.k8s.io", "/apis/rbac.authorization.k8s.io/v1", True),
+    ("rbac.authorization.k8s.io/v1", "RoleBinding"): ("rolebindings.rbac.authorization.k8s.io", "/apis/rbac.authorization.k8s.io/v1", True),
 }
 
 

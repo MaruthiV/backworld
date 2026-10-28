@@ -162,6 +162,9 @@ def run(bundle, output, docker_context, host_id):
     if platform.system() != "Linux" or platform.machine() not in ("x86_64", "amd64"):
         raise ValueError("execution requires a dedicated Linux AMD64 host")
     manifest = json.loads((bundle / "bundle.json").read_text())
+    mode = manifest.get("control_mode")
+    if mode not in (None, "shop_selector_v1") or manifest["cycles"] != (4 if mode else 2):
+        raise ValueError("unsupported native control mode or cycle count")
     for name, expected in manifest["files_sha256"].items():
         if sha(bundle / name) != expected:
             raise ValueError("bundle hash differs: " + name)
@@ -176,6 +179,7 @@ def run(bundle, output, docker_context, host_id):
     env = {**os.environ, "DOCKER_CONTEXT": docker_context, "KIND_EXPERIMENTAL_PROVIDER": "docker",
            "KIND_EXPERIMENTAL_DOCKER_NETWORK": network, "KUBECONFIG": str(kubeconfig)}
     command = Commands(output, env)
+    command.deadline = time.monotonic() + manifest["limits"]["work_s"]
     docker = ["docker", "--context", docker_context]
     context = json.loads(command(docker + ["context", "inspect", docker_context]))[0]
     info = json.loads(command(docker + ["info", "--format", "{{json .}}",]))
@@ -255,7 +259,7 @@ def run(bundle, output, docker_context, host_id):
                 or min(memory_bytes(node_status["allocatable"]["memory"]), caps["Memory"]) < 5014 * 1024 ** 2):
             raise ValueError("node readiness/architecture or cgroup/allocatable capacity differs")
         previous_uid = None
-        for cycle in (1, 2):
+        for cycle in range(1, manifest["cycles"] + 1):
             folder = output / f"cycle-{cycle}"
             folder.mkdir()
             actor = KubeControl(command, kube, app + control, folder, run_id)
@@ -279,33 +283,51 @@ def run(bundle, output, docker_context, host_id):
                     raise TimeoutError("application controllers did not become current/ready")
                 time.sleep(3)
             data = inventory(folder, "before")
+            if manifest.get("control_mode") == "shop_selector_v1":
+                previous = []
+                for pod in data["pods"]:
+                    for status in pod.get("status", {}).get("containerStatuses", []):
+                        if status.get("restartCount", 0):
+                            name, container = pod["metadata"]["name"], status["name"]
+                            raw = command(kube + ["logs", name, "-n", manifest["application_namespace"],
+                                                  "-c", container, "--previous", "--tail=200", "--limit-bytes=65536"], check=False)
+                            filename = "previous-" + name + "-" + container + ".log"
+                            (folder / filename).write_text(raw)
+                            previous.append({"pod_uid": pod["metadata"]["uid"], "container": container,
+                                             "restart_count": status["restartCount"], "last_state": status.get("lastState"), "log": filename})
+                save(folder / "startup-restarts.json", previous)
             validate_application(data, images)
             record_editor(command, kube, data, app, folder, "before")
             actor.create(control)
-            job_plan = next(o for o in control if o["kind"] == "Job")
-            deadline = time.monotonic() + 330
-            while True:
-                job = actor.get(job_plan)
-                owned(job, job_plan, run_id, actor.receipts[identity(job_plan)["key"]]["uid"])
-                pods = items("pods", manifest["private_namespace"])
-                if job.get("status", {}).get("succeeded") == 1 or job.get("status", {}).get("failed", 0) > 0:
-                    break
-                if time.monotonic() >= min(deadline, command.deadline):
-                    raise TimeoutError("private control did not complete within its deadline")
-                time.sleep(1)
-            if len(pods) != 1:
-                raise ValueError("private job did not create exactly one Pod")
-            pod = pods[0]
-            save(folder / "job.json", job)
-            save(folder / "private-pod.json", pod)
-            logs = {}
-            for container_name in ("warmup", "check"):
-                logs[container_name] = command(kube + ["logs", pod["metadata"]["name"], "--namespace", manifest["private_namespace"], "--container", container_name], check=False)
-                (folder / (container_name + ".jsonl")).write_text(logs[container_name])
-            validate_pod(pod, images)
-            verdict = audit_helper(logs["check"], pod, job, run_id, manifest["application_namespace"], manifest["source_hashes"])
-            data = inventory(folder, "after")
-            validate_application(data, images)
+            if manifest.get("control_mode") == "shop_selector_v1":
+                from service_operator.selector_native import run_cycle
+                verdict = run_cycle(command, kube, bundle, manifest, folder, data, images, inventory, cycle, actor)
+                data = inventory(folder, "final")
+            else:
+                job_plan = next(o for o in control if o["kind"] == "Job")
+                deadline = time.monotonic() + 330
+                while True:
+                    job = actor.get(job_plan)
+                    owned(job, job_plan, run_id, actor.receipts[identity(job_plan)["key"]]["uid"])
+                    pods = items("pods", manifest["private_namespace"])
+                    if job.get("status", {}).get("succeeded") == 1 or job.get("status", {}).get("failed", 0) > 0:
+                        break
+                    if time.monotonic() >= min(deadline, command.deadline):
+                        raise TimeoutError("private control did not complete within its deadline")
+                    time.sleep(1)
+                if len(pods) != 1:
+                    raise ValueError("private job did not create exactly one Pod")
+                pod = pods[0]
+                save(folder / "job.json", job)
+                save(folder / "private-pod.json", pod)
+                logs = {}
+                for container_name in ("warmup", "check"):
+                    logs[container_name] = command(kube + ["logs", pod["metadata"]["name"], "--namespace", manifest["private_namespace"], "--container", container_name], check=False)
+                    (folder / (container_name + ".jsonl")).write_text(logs[container_name])
+                validate_pod(pod, images)
+                verdict = audit_helper(logs["check"], pod, job, run_id, manifest["application_namespace"], manifest["source_hashes"])
+                data = inventory(folder, "after")
+                validate_application(data, images)
             record_editor(command, kube, data, app, folder, "after")
             result["cycles"].append({"cycle": cycle, "namespace_uid": uid, "verdict": verdict})
             command(docker + ["stats", "--no-stream", "--format", "{{json .}}", node_id])
